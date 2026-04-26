@@ -1,0 +1,32 @@
+anchor:
+  n_anchors: [500, 1000, 2000]   # hyperparameter sweep values
+  default: 1000
+  source: benign_train            # always sample anchors from label==0 train set
+
+rf_anchor:
+  n_estimators: 200
+  max_depth: 10
+  min_samples_leaf: 5
+  random_state: 42
+  class_weight: balanced
+
+task_drift:
+  max_iter: 200
+  learning_rate: 0.05
+  max_leaf_nodes: 31
+  l2_regularization: 0.0
+  include_anchor_distances: true
+  aggregation: max                 # alternatives: top2_mean
+
+logistic:
+  C: [0.01, 0.1, 1.0, 10.0]
+  max_iter: 1000
+  random_state: 42
+  class_weight: balanced
+  solver: lbfgs
+
+layers:
+  mode: concat                    # concat all sampled layers into one feature vector
+  # alt: last_only
+
+selection_metric: auroc           # metric used for val-set hyperparameter selection

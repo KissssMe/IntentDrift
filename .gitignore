@@ -1,0 +1,26 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.eggs/
+.codex
+.codex/
+.claude/
+/data/
+
+# Ignore generated output content but preserve directory markers.
+# Use /* (not /) so the directory itself is not ignored, allowing negation of .gitkeep.
+outputs/splits/*
+!outputs/splits/.gitkeep
+outputs/activations/*
+!outputs/activations/.gitkeep
+outputs/drift_activations/*
+!outputs/drift_activations/.gitkeep
+outputs/detectors/*
+!outputs/detectors/.gitkeep
+outputs/baselines/*
+!outputs/baselines/.gitkeep
+outputs/eval/*
+!outputs/eval/.gitkeep
+outputs/logs/*
+!outputs/logs/.gitkeep

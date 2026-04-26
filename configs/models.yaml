@@ -1,0 +1,61 @@
+llama3_3_70b:
+  path: /hub/huggingface/models/Llama-3.3-70B-Instruct
+  dtype: bfloat16
+  device_map: auto
+  trust_remote_code: false
+  layers: [0, 15, 31, 47, 63, 79]
+  num_hidden_layers: 80
+  hidden_dim: 8192
+  max_model_len: 131072
+  detect_max_tokens: 8192
+  truncation: head_tail
+  pad_token_id: 128009
+  supports_tools_in_chat_template: true
+  tool_call_format: llama3_json
+
+qwen3_32b:
+  path: /hub/huggingface/models/Qwen3-32B
+  dtype: bfloat16
+  device_map: auto
+  trust_remote_code: true
+  layers: [0, 15, 31, 47, 63]
+  num_hidden_layers: 64
+  hidden_dim: 5120
+  max_model_len: 32768
+  detect_max_tokens: 8192
+  truncation: head_tail
+  pad_token_id: null
+  supports_tools_in_chat_template: true
+  tool_call_format: hermes
+
+mistral_7b_v03:
+  path: /hub/huggingface/models/MistralAI/Mistral-7B-Instruct-v0.3
+  dtype: bfloat16
+  device_map: {"": 0}
+  trust_remote_code: false
+  layers: [0, 7, 15, 23, 31]
+  num_hidden_layers: 32
+  hidden_dim: 4096
+  max_model_len: 32768
+  detect_max_tokens: 8192
+  truncation: head_tail
+  pad_token_id: 2
+  supports_tools_in_chat_template: true
+  tool_call_format: mistral
+  chat_template_quirks: no_system_role
+
+gemma2_9b:
+  path: /hub/huggingface/models/google/gemma-2-9b-it
+  dtype: bfloat16
+  device_map: {"": 0}
+  trust_remote_code: false
+  layers: [0, 10, 20, 30, 41]
+  num_hidden_layers: 42
+  hidden_dim: 3584
+  max_model_len: 8192
+  detect_max_tokens: 6144
+  truncation: head_tail
+  pad_token_id: 0
+  supports_tools_in_chat_template: false
+  tool_call_format: prompting
+  chat_template_quirks: no_system_role

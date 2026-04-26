@@ -1,0 +1,27 @@
+sources:
+  injecagent:
+    enabled: true
+    sample_frac: 1.0
+  agentharm:
+    enabled: true
+    sample_frac: 1.0
+  asb:
+    enabled: true
+    sample_frac: 1.0
+  agenttraj_l:
+    enabled: true
+    sample_frac: 0.25       # stratified by domain, benign only
+    domains: 11
+  agentdojo:
+    enabled: true
+    train_frac: 0.80        # 80% to train pool, 20% held-out test
+    held_out_split_by: task_pair  # (user_task_id, injection_task_id) dedup
+
+splits:
+  train_val_ratio: 0.80     # of train pool → 80/20 train/val
+  stratify_by: [source, label]
+  random_seed: 42
+
+text:
+  role_separator: "\n[{role}]: "
+  truncation_marker: "\n[... truncated ...]\n"

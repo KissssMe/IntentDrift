@@ -1,0 +1,19 @@
+agentdojo:
+  suites: [workspace, slack, banking, travel]
+  user_task_sample_frac: 0.20
+  injection_task_sample_frac: 0.20
+  max_rounds: 15
+  detection_threshold: 0.5
+
+asb:
+  attack_types: [DPI, OPI]
+  max_attacker_tools: 50
+  detection_threshold: 0.5
+
+metrics:
+  primary: [auroc, auprc, accuracy, fpr_at_95tpr]
+  agent: [utility, security, attack_success_rate, detector_trigger_rate, benign_false_abort_rate]
+
+output:
+  summary_csv: outputs/eval/summary.csv
+  plots_dir: outputs/eval/plots
