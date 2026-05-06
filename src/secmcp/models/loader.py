@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -44,6 +45,13 @@ def load_model(name: str) -> LoadedModel:
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     cfg = load_model_cfg(name)
+    model_path = Path(cfg.path)
+    if model_path.is_absolute() and not model_path.exists():
+        raise FileNotFoundError(
+            f"Configured model path for {name!r} does not exist: {cfg.path}. "
+            "If this is a local Hugging Face checkpoint, make sure the path is mounted "
+            "and visible from the Python process running SecMCP."
+        )
     tokenizer = AutoTokenizer.from_pretrained(
         cfg.path,
         trust_remote_code=bool(getattr(cfg, "trust_remote_code", False)),

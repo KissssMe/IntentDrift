@@ -58,13 +58,24 @@ SecMCP/
 - 在 `SecMCP/` 初始化独立 git 仓库；父目录是另一个 git 仓库不影响内部提交。
 - `.gitignore` 忽略 `/data/`、`outputs/` 生成内容、缓存和本地 agent 状态。
 - `configs/models.yaml` 固定 4 个模型：
-  - `mistral_7b_v03`：第一优先实验模型，成本最低，先验证方案。
-  - `gemma2_9b`：第二优先，验证跨模型稳定性。
-  - `qwen3_32b`：中等规模泛化实验。
-  - `llama3_3_70b`：最终大模型验证。
+  - `mistral_7b_v03`：第一优先实验模型，成本最低，先验证方案；本地路径 `/hub/huggingface/models/MistralAI/Mistral-7B-Instruct-v0.3`。
+  - `gemma2_9b`：第二优先，验证跨模型稳定性；本地路径 `/hub/huggingface/models/google/gemma-2-9b-it`。
+  - `qwen3_32b`：中等规模泛化实验；本地路径 `/hub/huggingface/models/Qwen3-32B`。
+  - `llama3_3_70b`：最终大模型验证；本地路径 `/hub/huggingface/models/Llama-3.3-70B-Instruct`。
 - 统一使用 `head_tail` 截断；训练和推理必须共享同一 tokenizer、chat template、truncation、layers。
 
 验收：配置可加载；模型层号、hidden dim、max tokens 自洽；测试通过。
+
+## 模型路径约定
+
+后续实验统一按以下本地 Hugging Face checkpoint 路径加载模型；如果运行时报 `HFValidationError` 并把绝对路径当成 repo id 校验，优先检查当前执行环境是否能访问 `/hub/huggingface/models`。
+
+```text
+llama3.3-70B: /hub/huggingface/models/Llama-3.3-70B-Instruct
+Qwen3-32B:    /hub/huggingface/models/Qwen3-32B
+mistral3-7B:  /hub/huggingface/models/MistralAI/Mistral-7B-Instruct-v0.3
+gemma2-9B:    /hub/huggingface/models/google/gemma-2-9b-it
+```
 
 ## Phase 1 — 数据统一与 Trajectory 保留
 
@@ -326,7 +337,7 @@ outputs/eval/summary.csv
 
 ### 仍然只是部分具备
 
-- Phase 1 的“保留结构化 trajectory”在代码路径上具备，但当前本地 `outputs/splits/*.jsonl` 不是可直接用于 task-drift 的有效产物：检查结果显示这些 split 读回后没有可枚举的 tool step，`train/val/test` 的 tool step 数均为 0。这个现象通常意味着这些 split 是旧 schema 或旧脚本产物，缺少可恢复的 `messages` 字段；在重新提取 task-drift 激活前应先重跑 `scripts/01_unify_datasets.py`。
+- Phase 1 的“保留结构化 trajectory”在代码路径上具备，且当前本地 `outputs/splits/*.jsonl` 已经可以用于 task-drift：`train` 有 24,541 samples / 84,513 tool steps，`val` 有 6,135 samples / 21,158 tool steps，`test` 有 6,424 samples / 25,163 tool steps。
 - Phase 3 的实现依赖样本中真实存在 `role == "tool"` 消息。ASB 和 InjecAgent loader 会构造 tool message；AgentDojo loader 会保留 run JSON 中的 messages，但需要确认原始 AgentDojo run 文件里是否真的采用 tool role，或是否需要把 AgentDojo 的 observation / tool-result 角色映射到 `tool`。
 - Phase 4 目前实现的是 combined drift 主特征。PLAN 中的 task-only drift、history-only drift、combined drift 消融还没有显式配置入口或脚本化 sweep；source-normalized benign anchors 也还没有实现。
 - Layer ablation 主要依赖 `configs/training.yaml` 的 `layers.mode` 和模型配置层号手工切换；浅层 / 中层 / 深层 / concat 的系统化实验脚本还没有写。
@@ -342,11 +353,11 @@ outputs/eval/summary.csv
 
 ### 当前本地产物含义
 
-- `outputs/splits/{train,val,test}.jsonl` 已存在，但当前读回后无法产生 task-drift tool steps，需先重生成。
+- `outputs/splits/{train,val,test}.jsonl` 已存在，且当前读回后可以产生 task-drift tool steps，可以直接作为激活提取输入。
 - `outputs/activations/{mistral_7b_v03,gemma2_9b}/{train,val,test}/` 已存在，属于旧 whole-context baseline 激活；它们不能替代 `outputs/drift_activations/`。
 - `outputs/drift_activations/` 目前为空，说明新 task-drift 主方案还没有可训练的本地激活产物。
 - `outputs/detectors/mistral_7b_v03/rf_anchor_best.pkl` 已存在，属于旧 whole-context RF baseline，不是 task-drift detector。
 
 ### 最近下一步
 
-先重生成 split，确认 split 中能枚举出 tool steps；再按目标模型生成 `train`、`val`、`test` 三个 split 的 task-drift 激活；然后训练 `task_drift` detector。只有这三步完成后，离线 AUROC/AUPRC/FPR@95TPR 才能代表新方案的主线结果。AgentDojo / ASB runtime 评估和 baseline 对比仍需要后续补脚本。
+当前 split 已经确认能枚举出 tool steps；下一步是按目标模型生成 `train`、`val`、`test` 三个 split 的 task-drift 激活，然后训练 `task_drift` detector。只有这两步完成后，离线 AUROC/AUPRC/FPR@95TPR 才能代表新方案的主线结果。AgentDojo / ASB runtime 评估和 baseline 对比仍需要后续补脚本。
