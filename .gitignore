@@ -24,3 +24,21 @@ outputs/eval/*
 !outputs/eval/.gitkeep
 outputs/logs/*
 !outputs/logs/.gitkeep
+
+# Mini-subset experiment outputs (large)
+outputs/splits_mini/
+outputs/activations_mini/
+outputs/drift_activations_mini/
+outputs/detectors_mini/
+outputs/detectors_fpr20/
+outputs/baselines_mini/
+outputs/eval_mini/
+
+# Stray logs at outputs root
+outputs/*.txt
+outputs/*.log
+
+# Local scratch
+tempplan.md
+--model
+conda

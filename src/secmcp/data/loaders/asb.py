@@ -75,6 +75,7 @@ def load(root: Path, max_samples: int | None = None) -> list[UnifiedSample]:
                     "attack_type": row.get("Attack Type"),
                     "agent": row.get("Corresponding Agent"),
                     "aggressive": row.get("Aggressive"),
+                    "malicious_tool_message_indices": [3],
                 },
             )
         )

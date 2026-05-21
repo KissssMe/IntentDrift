@@ -5,10 +5,12 @@ from types import SimpleNamespace
 import pytest
 
 from secmcp.models.hooks import (
+    TASK_ANCHOR_SEPARATOR,
     extract_last_token_from_hidden_states,
     last_token_hidden_states,
     normalize_chat_messages,
     prepare_inputs,
+    task_anchored_hidden_states,
 )
 
 
@@ -112,3 +114,50 @@ def test_last_token_hidden_states_end_to_end_fake():
     assert tuple(out.shape) == (2, 3)
     assert torch.all(out[0] >= 100)
     assert torch.all(out[1] >= 400)
+
+
+def test_task_anchored_hidden_states_shape_and_position():
+    """The task tokens are appended at the tail; hidden states at those tail
+    positions are pooled and returned. Output shape is [n_layers, hidden_dim]."""
+    model = FakeModel(n_layers=4, hidden_dim=3)
+    tokenizer = FakeTokenizer()
+    prefix_messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "do X"},
+        {"role": "assistant", "content": "ok"},
+    ]
+    out = task_anchored_hidden_states(model, tokenizer, prefix_messages, "do X", [0, 3], _cfg())
+    assert tuple(out.shape) == (2, 3)
+    assert torch.isfinite(out).all()
+
+
+def test_task_anchored_falls_back_when_task_text_empty():
+    """Empty task_text degenerates to the last-token probe rather than crashing."""
+    model = FakeModel(n_layers=4, hidden_dim=3)
+    tokenizer = FakeTokenizer()
+    out = task_anchored_hidden_states(
+        model, tokenizer, [{"role": "user", "content": "hello"}], "", [0, 3], _cfg()
+    )
+    assert tuple(out.shape) == (2, 3)
+
+
+def test_task_anchored_separator_is_stable():
+    """The separator must be a fixed, non-empty string so probes from
+    different prefixes are comparable."""
+    assert isinstance(TASK_ANCHOR_SEPARATOR, str) and len(TASK_ANCHOR_SEPARATOR) > 0
+
+
+def test_task_anchored_differs_across_prefixes():
+    """Adding more context before the appended task tokens must change their
+    pooled hidden states (causal attention sees the extra preceding tokens)."""
+    model = FakeModel(n_layers=4, hidden_dim=3)
+    tokenizer = FakeTokenizer()
+    short_prefix = [{"role": "user", "content": "task"}]
+    long_prefix = [
+        {"role": "user", "content": "task"},
+        {"role": "assistant", "content": "calling tool"},
+        {"role": "tool", "content": "tool output"},
+    ]
+    out_short = task_anchored_hidden_states(model, tokenizer, short_prefix, "task", [0, 3], _cfg())
+    out_long = task_anchored_hidden_states(model, tokenizer, long_prefix, "task", [0, 3], _cfg())
+    assert not torch.allclose(out_short, out_long)

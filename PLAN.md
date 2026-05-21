@@ -183,7 +183,7 @@ meta 至少包含：
 
 - `HistGradientBoostingClassifier`
 - validation set 选择 threshold，主校准目标为 FPR@95TPR。
-- trajectory-level score 默认从 step-level score 聚合，优先比较 `max` 与 `top-2 mean`。
+- trajectory-level score 默认从 step-level score 聚合；当前默认是 `first_exceed_3`（前 3 步内最高分），可选 `max / top2_mean / mean / first_exceed_K / cusum[_wN_sX_rY]`。早期方案默认 `max`，但 `max` 在长 benign 轨迹上有 1−(1−p)ⁿ 的 FPR 放大问题，参见下方"方法学修复"段。
 
 保留 baseline：
 
@@ -331,8 +331,8 @@ outputs/eval/summary.csv
 - Phase 0 的仓库骨架、配置文件、输出目录约定和测试入口已经具备。`configs/models.yaml`、`configs/data.yaml`、`configs/training.yaml`、`configs/eval.yaml` 均可加载，基础单测覆盖了配置、schema、截断、loader、activation dataset、detector metric 等路径。
 - Phase 1 的统一 schema、数据源 loader、合并脚本和 split 脚本已经存在。`UnifiedSample` 支持 `messages`、`tools`、`metadata`，AgentDojo 按 `split_group` 做 held-out，其他来源按 `(source, label)` 分层；`scripts/01_unify_datasets.py` 能写出 `outputs/splits/{train,val,test}.jsonl`。
 - Phase 2 的模型加载、chat message 规范化、system-role 兼容处理、head-tail 截断和 last-token hidden-state hook 已经实现，并有 mock 单测。训练和推理共享 `load_shared_model`、模型配置层号和截断配置。
-- Phase 3 的 task-drift 激活提取代码已经实现：每个 `role == "tool"` 的消息会生成 `task_prefix`、`history_prefix`、`post_tool_prefix`，输出 `drift_*.pt`、`labels_*.pt`、`meta_*.jsonl` 到 `outputs/drift_activations/{model}/{split}/`。脚本 `scripts/02_extract_activations.py` 当前默认走 `task_drift` 模式，旧 whole-context 仍可通过 `--mode whole_context` 显式运行。
-- Phase 4 的主 detector 已经可训练：`HistGradientBoostingClassifier`、benign incremental/global drift anchors、`include_anchor_distances` 配置、每层 norm/cosine、trajectory-level `max` / `top2_mean` score 聚合、validation threshold 选择、metrics 保存都已经在代码中。旧 `rf_anchor` 和 `logistic_diff` whole-context baseline 训练代码也保留。
+- Phase 3 的 task-drift 激活提取代码已经实现：每个 `role == "tool"` 的消息会生成 `task_prefix`、`history_prefix`、`post_tool_prefix`，输出 `drift_*.pt`、`labels_*.pt`、`meta_*.jsonl` 到 `outputs/drift_activations/{model}/{split}/`。脚本 `scripts/02_extract_activations.py` 当前默认走 `task_drift` 模式，旧 whole-context 仍可通过 `--mode whole_context` 显式运行；task-drift 路径已有 tqdm step 进度条和 `--log-every` 心跳输出。
+- Phase 4 的主 detector 已经可训练：`HistGradientBoostingClassifier`、benign incremental/global drift anchors、`include_anchor_distances` 配置、每层 norm/cosine、trajectory-level 聚合（默认 `first_exceed_3`，可选 `max / top2_mean / mean / cusum[_wN_sX_rY]`）、validation threshold 选择、metrics 保存都已经在代码中。旧 `rf_anchor` 和 `logistic_diff` whole-context baseline 训练代码也保留；训练入口已有 shard 加载、特征构造、fit、val/test scoring、保存阶段的命令行进度输出，可用 `--no-progress` 关闭。
 - Phase 5 的 AgentDojo pipeline element 已有集成类 `SecMCPTaskDriftDetector`。它能在 tool message 后计算当前 step score，按 detector 保存的 aggregation 聚合成 trajectory score，并在 `raise_on_detection=True` 时抛出 `AbortAgentError`。
 
 ### 仍然只是部分具备
@@ -355,9 +355,253 @@ outputs/eval/summary.csv
 
 - `outputs/splits/{train,val,test}.jsonl` 已存在，且当前读回后可以产生 task-drift tool steps，可以直接作为激活提取输入。
 - `outputs/activations/{mistral_7b_v03,gemma2_9b}/{train,val,test}/` 已存在，属于旧 whole-context baseline 激活；它们不能替代 `outputs/drift_activations/`。
-- `outputs/drift_activations/` 目前为空，说明新 task-drift 主方案还没有可训练的本地激活产物。
+- `outputs/drift_activations/mistral_7b_v03/{train,val,test}/` 已存在，属于新 task-drift 主方案激活产物：`train` 为 846 shards / 84,513 steps，`val` 为 212 shards / 21,158 steps，`test` 为 252 shards / 25,163 steps。
 - `outputs/detectors/mistral_7b_v03/rf_anchor_best.pkl` 已存在，属于旧 whole-context RF baseline，不是 task-drift detector。
+- `outputs/detectors/mistral_7b_v03/task_drift_best.pkl` 和 `task_drift_metrics.json` 已存在，属于 Mistral task-drift detector。
+
+### 当前可直接运行的命令
+
+生成 task-drift 激活，默认有进度显示；`--shard-size 100` 时 shard 数等于 `ceil(tool_steps / 100)`，文件从 `00000` 开始编号，所以最后一个 `00211` 代表第 212 个 shard。
+
+```bash
+conda run -n taskdrift python scripts/02_extract_activations.py \
+  --model mistral_7b_v03 --split train --mode task_drift --shard-size 100 --log-every 1
+
+conda run -n taskdrift python scripts/02_extract_activations.py \
+  --model mistral_7b_v03 --split val --mode task_drift --shard-size 100 --log-every 1
+
+conda run -n taskdrift python scripts/02_extract_activations.py \
+  --model mistral_7b_v03 --split test --mode task_drift --shard-size 100 --log-every 1
+```
+
+训练 Mistral task-drift detector：
+
+```bash
+conda run -n taskdrift python scripts/03_train_detector.py \
+  --model mistral_7b_v03 --detector task_drift
+```
+
+训练时会读取 `outputs/drift_activations/{model}/{train,val,test}/`，输出 `outputs/detectors/{model}/task_drift_best.pkl` 和 `task_drift_metrics.json`。如果只想先用 train/val 训练并跳过 test 评估，加 `--no-test`；如果想关闭加载和训练阶段的进度输出，加 `--no-progress`。
+
+快速验证当前 shard 是否完整：
+
+```bash
+python -c 'from pathlib import Path
+root=Path("outputs/drift_activations/mistral_7b_v03")
+for split in ["train","val","test"]:
+    out=root/split
+    metas=sorted(out.glob("meta_*.jsonl"))
+    print(split, len(list(out.glob("drift_*.pt"))), len(list(out.glob("labels_*.pt"))), len(metas), sum(1 for p in metas for _ in p.open()))'
+```
 
 ### 最近下一步
 
-当前 split 已经确认能枚举出 tool steps；下一步是按目标模型生成 `train`、`val`、`test` 三个 split 的 task-drift 激活，然后训练 `task_drift` detector。只有这两步完成后，离线 AUROC/AUPRC/FPR@95TPR 才能代表新方案的主线结果。AgentDojo / ASB runtime 评估和 baseline 对比仍需要后续补脚本。
+Mistral 的 task-drift 激活和 detector 已经具备；下一步应先检查 `task_drift_metrics.json` 的 val/test AUROC、AUPRC、FPR@95TPR，再决定是否跑 Gemma 的同一流程。AgentDojo / ASB runtime 评估和 baseline 对比仍需要后续补脚本。
+
+## 改进建议与执行记录
+
+当前 Mistral detector 的主要问题不是漏检，而是 benign false abort 过高。原始 detector 在 held-out AgentDojo test 上约为 `TPR=95.0% / FNR=5.0% / FPR=69.1%`；这不能直接换算为安全 benchmark ASR，最多只能作为 detector-only 的漏检上界参考。真实 ASR 必须在 AgentDojo / ASB runtime 中统计“攻击成功且未被 abort”的比例。
+
+### 已落地的直接改进
+
+- 阈值校准改为可约束 false abort：`task_drift.threshold_max_fpr` 默认设为 `0.20`，`scripts/03_train_detector.py` 支持 `--threshold-target-tpr` 和 `--threshold-max-fpr`。metrics 中会保存当前阈值下的 TP/FP/TN/FN、TPR/FNR/FPR/TNR，以及多个 target-FPR 的 tradeoff。
+- 训练加入 step-level label imbalance 处理：`task_drift.sample_weight: balanced`，也可用 `--sample-weight none|balanced` 覆盖。
+- AgentDojo split 改为 `train/val/test` 三方 `split_group` 互斥，避免 train 与 val 共享同一 injection/task group，从而让 val threshold calibration 更接近 held-out 行为。需要重新运行 `scripts/01_unify_datasets.py`、重新抽取 task-drift 激活、重新训练 detector 后才会反映到正式结果。
+- 训练 metrics 增加分组诊断：`diagnostics.{val,test}_group_diagnostics` 按 `source`、`sample_type`、`metadata.suite_name` 输出混淆矩阵，便于定位 hard negatives 和 suite-level false abort。
+- Step-level label 已做第一版修正：ASB / InjecAgent 用显式恶意 tool index；AgentDojo 用 injection 文本片段匹配 tool output。命中的 tool step 标 `1`，同一恶意 trajectory 中未命中的 tool step 标 `0`；无法定位时回退 trajectory label。
+
+### 需要重跑的命令
+
+由于 split 逻辑已改变，旧 `outputs/splits/` 和旧 activation shards 不再代表当前代码。完整重跑顺序：
+
+```bash
+conda run -n taskdrift python scripts/01_unify_datasets.py
+
+conda run -n taskdrift python scripts/02_extract_activations.py \
+  --model mistral_7b_v03 --split train --mode task_drift --shard-size 100 --log-every 1 --no-resume
+conda run -n taskdrift python scripts/02_extract_activations.py \
+  --model mistral_7b_v03 --split val --mode task_drift --shard-size 100 --log-every 1 --no-resume
+conda run -n taskdrift python scripts/02_extract_activations.py \
+  --model mistral_7b_v03 --split test --mode task_drift --shard-size 100 --log-every 1 --no-resume
+
+conda run -n taskdrift python scripts/03_train_detector.py \
+  --model mistral_7b_v03 --detector task_drift
+```
+
+如需比较更保守或更激进的 utility/safety tradeoff：
+
+```bash
+conda run -n taskdrift python scripts/03_train_detector.py \
+  --model mistral_7b_v03 --detector task_drift --threshold-max-fpr 0.10
+
+conda run -n taskdrift python scripts/03_train_detector.py \
+  --model mistral_7b_v03 --detector task_drift --threshold-max-fpr 0.30
+```
+
+### 方法学修复（已落地，Mistral 需重抽激活）
+
+- **弱标签前向传播**：`tool_steps_for_sample` 不再只把命中 injection 文本片段的 tool step 标 1。命中第一个 injection step 起，trajectory 之后所有 tool step 都标 1。原先的实现会把"被劫持但非匹配"的后续 tool step 标 0，使分类器对同一类 hijacked-state 表征收到自相矛盾的监督。`step_label_source` 仍标记为 `matched_injection_tool` 以与 trajectory-level fallback 区分。
+- **task-anchored 激活提取**：原 `task_anchor / history_anchor / post_tool_state` 取的是三段不同前缀的 *last-token* hidden state，等价于"两个不同 token 在同一空间的差"，不是对 task 的漂移度量。新实现把原始 user-task 文本在每段前缀末尾再次拼接（`TASK_ANCHOR_SEPARATOR + task_text` 作为 raw token），causal attention 让重读的 task token 看到全部前文，最后对 task token 位置做 mean pooling。三段前缀拼接同样的 task，差异即"加入这段历史/工具响应后，模型对 task 的理解漂移了多少"，与 TaskTracker 原始设定一致。
+  - 新 hook：`secmcp.models.hooks.task_anchored_hidden_states(model, tokenizer, prefix_messages, task_text, layers, cfg)`。
+  - 旧 `last_token_hidden_states` 仍保留，仅供 whole-context baseline 与回归测试使用。
+  - 每条 meta 记录写入 `extraction_mode: "task_anchor_mean"`，便于检测混用。
+  - **`outputs/drift_activations/{mistral_7b_v03,gemma2_9b}/` 旧 shard 全部失效，必须 `--no-resume` 重抽**；旧 detector pkl 也需重训。
+- **counterfactual pair 数据构造**：新增 `secmcp.data.counterfactual` 把 InjecAgent + ASB 的 attacker instruction pool 注入 AgentTraj-L benign trajectory 的某条 tool response，得到 (clean, attacked) 同 task 同 history pair；两半共享 `metadata.split_group` 强制走同一 split 边。`scripts/01_unify_datasets.py` 增加 `--counterfactual-pairs` 与 `--counterfactual-attacks-per-benign N`。`make_splits` 的非 AgentDojo 分支换成 group-aware `stratified_grouped_split`，pair 不会被打散；旧的 `stratified_split` 行为保留作 backward compat。注入后的 attacked trajectory 在 metadata 直接写明 `malicious_tool_message_indices`，所以弱标签 + 前向传播逻辑能精确定位 step。
+- **per-trajectory self-baseline 特征**：`drift_feature_matrix` 新加 `include_self_baseline=True` 与 `prior_state` 参数。对每个 step 用本 trajectory 之前 step 的 `inc_norm / glob_norm / hist_norm / relative_norm` 计算 mean/std 并 z-score；trajectory 第一步无 prior → 输出零向量。这缓解 source/suite 异质性引起的 OOD-benign 假报警。Runtime detector (`SecMCPTaskDriftDetector`) 通过 `extra_args["secmcp_task_drift_prior_state"]` 持久化 `TrajectoryPriorNorms`，逐步累积。`configs/training.yaml` 增加 `task_drift.include_self_baseline: true`。
+- **trajectory-level aggregation**：`aggregate_step_scores` 除原有 `max / top2_mean` 外新增 `mean / first_exceed_K / cusum[_wN_sX_rY]`。`first_exceed_K` 把检测预算锁定在前 K 步（一旦攻击没在早期出现就不会再触发，避免 `max` 在长 benign 轨迹上 1−(1−p)ⁿ 的 FPR 爆炸）；`cusum` 是 Page CUSUM，对持续抬升敏感、对孤立 spike 衰减。Diagnostics 新增 `val_trajectory_abort_rate / test_trajectory_abort_rate` 直接出 trajectory FPR。
+
+### 重跑命令（建议顺序）
+
+```bash
+# 1. 重新生成 splits（带 counterfactual pair；如不需可去掉 flag）
+conda run -n taskdrift python scripts/01_unify_datasets.py \
+  --counterfactual-pairs --counterfactual-attacks-per-benign 1
+
+# 2. 重抽 task-anchored 激活（旧 shard 必须丢弃）
+for split in train val test; do
+  conda run -n taskdrift python scripts/02_extract_activations.py \
+    --model mistral_7b_v03 --split $split --mode task_drift \
+    --shard-size 100 --log-every 1 --no-resume
+done
+
+# 3. 重训 task-drift detector
+conda run -n taskdrift python scripts/03_train_detector.py \
+  --model mistral_7b_v03 --detector task_drift
+```
+
+如要做 aggregation sweep，可临时改 `configs/training.yaml` 的 `task_drift.aggregation`（如 `first_exceed_3` 或 `cusum_w5`）后重训第三步即可，不需要重抽激活。
+
+### Mini 实验集（不重抽激活，分布匹配）
+
+为加快方法学迭代，新增 `scripts/make_mini_subset.py`：从已有 `outputs/splits/*.jsonl` 与 `outputs/drift_activations/{model}/{split}/` 直接切出一个 ~20% 的子集，**不做任何 forward pass**，原产物保持不动。
+
+- 分层：按 `(source, label)` 在 *样本数* 维度上抽 20%（不是按组数，避免 AgentDojo 大组把比例顶到 35-45%）。
+- 原子性：仅锁 counterfactual `(clean, attacked)` pair（识别 `metadata.pair_id` 或 `split_group` 以 `cf:` 起头）；AgentDojo `split_group` 在同一 split 内允许内部抽样，因为它本来只是跨 split 防泄漏标记。
+- meta：mini shard 的 `sample_index` 重新编号 0..N-1 与新 jsonl 行号对齐，原编号留在 `original_sample_index`。trajectory 聚合按 `sample_index` 分组的逻辑无需改动。
+- 输出：`outputs/splits_mini/{train,val,test}.jsonl` + `outputs/drift_activations_mini/{model}/{split}/`，与全量产物并存。
+
+当前 mini 集（fraction=0.20, seed=42）：train 4,907 样本 / 16,938 step；val 1,227 / 4,259；test 1,284 / 4,991。每个 (source, label) bucket 命中 20% ±1%，仅 asb/injecagent label=0（总数 3-15）有 ±5% 抖动。
+
+```bash
+# 生成 mini 集（默认覆盖原 mini 目录）
+conda run -n taskdrift python scripts/make_mini_subset.py --fraction 0.20 --seed 42
+
+# 在 mini 集上训 detector（其它 flag 同全量）
+conda run -n taskdrift python scripts/03_train_detector.py \
+  --model mistral_7b_v03 --detector task_drift \
+  --drift-activation-root outputs/drift_activations_mini
+
+# 给新模型抽 mini 激活：让 02 脚本读 splits_mini/，写 drift_activations_mini/
+conda run -n taskdrift python scripts/02_extract_activations.py \
+  --model gemma2_9b --split train --mode task_drift \
+  --splits-dir outputs/splits_mini --output-root outputs/drift_activations_mini --no-resume
+
+# 仅生成 splits_mini jsonl，跳过激活复制
+conda run -n taskdrift python scripts/make_mini_subset.py --no-activations
+```
+
+  你现在应该跑这个，用 mini split 重新抽较小激活集，然后训练 mini detector：
+
+  for split in train val test; do
+    conda run -n taskdrift python scripts/02_extract_activations.py \
+      --model mistral_7b_v03 \
+      --split $split \
+      --mode task_drift \
+      --splits-dir outputs/splits_mini \
+      --output-root outputs/drift_activations_mini \
+      --shard-size 100 \
+      --log-every 1 \
+      --no-resume
+  done
+
+  然后训练：
+
+  conda run -n taskdrift python scripts/03_train_detector.py \
+    --model mistral_7b_v03 \
+    --detector task_drift \
+    --drift-activation-root outputs/drift_activations_mini \
+    --output-root outputs/detectors_mini
+
+
+
+- Hard-negative loop：从 `diagnostics.test_group_diagnostics` 和 false-positive benign trajectories 中定位误报最多的 suite/tool/sample_type，把这些 benign tool steps 加入更高权重的校准集或训练权重。
+- Step-level label 进一步改进：提高 AgentDojo injection 片段匹配覆盖率；匹配不到的 positive trajectory 后续可改为 multiple-instance learning。
+- Source/suite-normalized anchors：为 AgentDojo suite 或 tool type 维护 benign incremental/global anchor，而不是所有 benign step 共用一组 anchor。
+- 系统化 sweep：`aggregation=max/top2_mean`、`n_anchors=500/1000/2000`、`include_anchor_distances=true/false`、`layers.mode=concat/last_only`、不同 layer 组合，统一写入 summary 表。
+- Runtime benchmark：实现 `scripts/04_eval_agentdojo.py` 后，以 utility/security、ASR、benign false abort rate、trigger turn、trigger tool 为主指标；离线 accuracy 只作为辅助诊断。
+
+## Phase 5 落地记录
+
+### 已做
+
+- 在 `taskdrift` env 安装 AgentDojo：`pip install -e data/AgentDojo --no-deps`，并补齐 `anthropic / cohere / google-genai / openai / docstring-parser / tenacity / python-dotenv / deepdiff / email-validator / pydantic[email]`。
+- `src/secmcp/integrations/agentdojo_drift_detector.py`：detector 在每个 tool step 通过 `Logger.set_contextarg` 把 `secmcp_task_drift_{scores,trajectory_score,aggregation,threshold,triggered,trigger_step}` 写进 AgentDojo TraceLogger，跟随 per-task JSON 持久化。
+- `scripts/04_eval_agentdojo.py`：CLI 驱动，三种 defense 模式 `none / shadow / abort`，每个 suite 同时跑 clean (`benchmark_suite_without_injections`) 与 attacked (`benchmark_suite_with_injections`)；采样比例默认读 `configs/eval.yaml`，可用 `--user-task-frac / --injection-task-frac / --max-user-tasks / --max-injection-tasks` 覆盖；pipeline 手工构造（不走 `AgentPipeline.from_config`，因为它 `defense` enum 不含 secmcp）；`--dry-run` 不调 LLM 即可列出抽样 task。
+- `src/secmcp/integrations/agentdojo_eval.py`：扫 `{logdir}/{pipeline_name}/{suite}/.../*.json`，输出 `metrics.json`（per-suite + overall：utility_clean / utility_attacked / security_attacked / ASR / detector_trigger_rate / benign_false_abort_rate / mean_trigger_step）和 `step_scores.jsonl`（每条 trajectory 的 per-step score 与 trigger 信息）。
+- 测试：`tests/test_agentdojo_eval.py`（聚合器 2 用例），原有 `tests/test_agentdojo_drift_detector.py` 仍通过。
+
+### 输出目录
+
+```text
+outputs/eval/agentdojo/
+├── runs/                                   # AgentDojo 原生 per-task trace JSON
+│   └── {llm}-{defense_tag}/{suite}/{user_task}/{attack}/{injection}.json
+└── {llm}-{defense_tag}/
+    ├── run_summary.json                    # 本次抽样的 suite/user/injection 列表
+    ├── metrics.json                        # 聚合指标
+    └── step_scores.jsonl                   # 每条轨迹的 SecMCP per-step 分数
+```
+
+其中 `defense_tag ∈ {no_defense, secmcp_shadow_{model}, secmcp_abort_{model}}`。
+
+### 接下来要跑的命令
+
+前置：`export OPENAI_API_KEY=...`；detector pkl 默认查 `outputs/detectors/{model}/task_drift_best.pkl`，当前只有 mini 版，所以先用 `--detector-path` 指过去。
+
+```bash
+# 1. dry-run 验抽样（不调 LLM、不加载模型）
+conda run -n taskdrift python scripts/04_eval_agentdojo.py \
+  --suite workspace --max-user-tasks 1 --max-injection-tasks 1 --dry-run
+
+# 2. 冒烟：workspace 1×1，三档 defense 全跑
+for D in none shadow abort; do
+  conda run -n taskdrift python scripts/04_eval_agentdojo.py \
+    --detector-path outputs/detectors_mini/mistral_7b_v03/task_drift_best.pkl \
+    --suite workspace --max-user-tasks 1 --max-injection-tasks 1 \
+    --defense $D
+done
+
+# 3. 正式（用 eval.yaml 的 20% 抽样，4 个 suite，important_instructions 攻击）
+#    顺序：no_defense baseline → secmcp_shadow 校准阈值 → secmcp_abort 出主结果
+conda run -n taskdrift python scripts/04_eval_agentdojo.py --defense none
+conda run -n taskdrift python scripts/04_eval_agentdojo.py --defense shadow \
+  --detector-path outputs/detectors/mistral_7b_v03/task_drift_best.pkl
+conda run -n taskdrift python scripts/04_eval_agentdojo.py --defense abort \
+  --detector-path outputs/detectors/mistral_7b_v03/task_drift_best.pkl \
+  --threshold <从 shadow 的 step_scores.jsonl 校出来的值>
+
+# 4. 不用 OpenAI：先 `vllm serve /hub/huggingface/models/MistralAI/Mistral-7B-Instruct-v0.3`
+#    再加 --llm-provider local --llm-model mistral
+```
+
+常用 flag：`--suite workspace slack banking travel`、`--attack important_instructions`、`--skip-clean / --skip-attacked` 拆开跑、`--force-rerun` 覆盖已存在的 trace。
+
+### 已知遗留
+
+- 我没有 `OPENAI_API_KEY`，所以**真正的 end-to-end smoke run 没跑成**；上面 dry-run + pipeline 构造已验证，剩下需要你配 key 实跑一次。
+- 默认 detector 路径指向 `outputs/detectors/mistral_7b_v03/task_drift_best.pkl`，但当前仓库里只有 `rf_anchor_best.pkl` 和 `outputs/detectors_mini/.../task_drift_best.pkl`；想用默认路径请先完成 PLAN 上面那段重跑流程，或始终通过 `--detector-path` 指过去。
+
+## 2026-05-15 运行记录
+
+- ChatAnywhere key 不能直连 OpenAI 官方端点；需设 `OPENAI_BASE_URL=https://api.chatanywhere.tech/v1`，模型名用 `gpt-4o-mini-2024-07-18` 以匹配 AgentDojo attack 模板。
+- AgentDojo eval 脚本已修：ASR 不再反向计算；false abort 改用 `secmcp_task_drift_aborted`；regular clean 与 injection-task-as-user 分开；pipeline 名加入 threshold / sample cap / seed，避免旧 trace 混入。
+- mini Mistral detector 在 workspace 8 user × 3 injection 的高阈值 `0.98964` 下：shadow ASR `0.125`，abort ASR `0.0417`，regular-clean false abort `0`；结论只作 smoke，不作正式结果。
+- `none` baseline 曾因模型返回非法 tool-call JSON 崩溃；这是 ChatAnywhere/模型输出稳定性问题，不是 detector 问题。
+- 当前 `outputs/splits` 是 5 月 14 日重生成过的 step-locator 版本，但未发现 counterfactual pair 标记；若要严格按最新 counterfactual 方案，需重建 splits 并重抽激活。
+
+## 下一步
+
+- 继续抽全量 Mistral/Gemma task-drift activations；中断可 resume，split 改动后才用 `--no-resume` 重抽。
+- 训练正式 detector 后再跑 AgentDojo；mini detector 只用于 pipeline smoke。
+- AgentDojo 多样本评估要显式加 `--user-task-frac 1.0 --injection-task-frac 1.0`，否则先按 `eval.yaml` 的 20% 采样再 cap。
+- baseline / shadow / abort 分开跑；若 `none` 继续 JSONDecodeError，换官方 OpenAI key 或更稳 endpoint。

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -19,13 +20,41 @@ def _injection_text(obj: dict[str, Any]) -> str:
     return "\n".join(str(v) for _, v in sorted(values.items())).strip()
 
 
+def _injection_fragments(text: str, min_len: int = 40) -> list[str]:
+    fragments = [part.strip() for part in re.split(r"\n+", text) if len(part.strip()) >= min_len]
+    return fragments or ([text.strip()] if text.strip() else [])
+
+
 def _label(obj: dict[str, Any]) -> int:
-    user_task_id = str(obj.get("user_task_id") or "")
-    if obj.get("injection_task_id") or obj.get("attack_type"):
-        return 1
-    if user_task_id.startswith("injection_task_"):
-        return 1
-    return 0
+    """Positive only when the run actually delivered an injection.
+
+    Previously this returned 1 for any ``user_task_id`` starting with
+    ``injection_task_`` even when the run carried no ``injections`` content
+    (e.g. clean control reruns of an injection scenario). Those samples have no
+    locatable tool step and only contaminate the step-level supervision.
+    """
+    has_injection_content = bool(obj.get("injections"))
+    has_injection_tag = bool(obj.get("injection_task_id") or obj.get("attack_type"))
+    return 1 if (has_injection_content and has_injection_tag) else 0
+
+
+def _malicious_tool_indices(messages: list[dict[str, Any]], fragments: list[str]) -> list[int]:
+    """Indices of tool messages whose content contains any injection fragment.
+
+    Returned in message order; downstream code uses ``min(indices)`` as the
+    first hijack point. Empty list when no fragment matches — those positives
+    will be dropped by ``drop_unlocatable_positives``.
+    """
+    if not fragments:
+        return []
+    matched: list[int] = []
+    for idx, msg in enumerate(messages):
+        if msg.get("role") != "tool":
+            continue
+        content = str(msg.get("content") or "")
+        if any(fragment in content for fragment in fragments):
+            matched.append(idx)
+    return matched
 
 
 def load(root: Path, max_samples: int | None = None, pipeline: str | None = None) -> list[UnifiedSample]:
@@ -40,6 +69,10 @@ def load(root: Path, max_samples: int | None = None, pipeline: str | None = None
             continue
         label = _label(obj)
         injection_text = _injection_text(obj)
+        injection_fragments = _injection_fragments(injection_text)
+        malicious_tool_indices = (
+            _malicious_tool_indices(messages, injection_fragments) if label == 1 else []
+        )
         if injection_text:
             split_group = f"injection:{_hash_text(injection_text)}"
         else:
@@ -63,6 +96,9 @@ def load(root: Path, max_samples: int | None = None, pipeline: str | None = None
                     "num_turns": len(messages),
                     "file": str(path.relative_to(root)),
                     "injection_hash": _hash_text(injection_text) if injection_text else None,
+                    "injection_text": injection_text,
+                    "injection_fragments": injection_fragments,
+                    "malicious_tool_message_indices": malicious_tool_indices,
                     "split_group": split_group,
                 },
             )

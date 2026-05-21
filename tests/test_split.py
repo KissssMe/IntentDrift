@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from secmcp.data.schema import UnifiedSample
-from secmcp.data.split import deduplicate, make_splits
+from secmcp.data.split import deduplicate, make_splits, stratified_grouped_split
 
 
 def _sample(source: str, label: int, idx: int, group: str | None = None) -> UnifiedSample:
@@ -36,7 +36,10 @@ def test_make_splits_agentdojo_group_disjoint():
         if s.source == "agentdojo"
     }
     test_groups = {s.metadata.get("split_group") for s in splits["test"]}
+    train_groups = {s.metadata.get("split_group") for s in splits["train"] if s.source == "agentdojo"}
+    val_groups = {s.metadata.get("split_group") for s in splits["val"] if s.source == "agentdojo"}
     assert train_val_groups.isdisjoint(test_groups)
+    assert train_groups.isdisjoint(val_groups)
     assert splits["train"]
     assert splits["val"]
     assert splits["test"]
@@ -53,3 +56,28 @@ def test_make_splits_train_val_have_both_labels():
     for split_name in ("train", "val"):
         labels = {s.label for s in splits[split_name]}
         assert labels == {0, 1}, f"{split_name} split missing a label: {labels}"
+
+
+def test_grouped_split_stratifies_by_full_group_composition():
+    """Mixed-label pair groups must not be bucketed as only their first sample."""
+    samples = []
+    for i in range(10):
+        group = f"pair-{i}"
+        samples.append(_sample("agenttraj_l", 0, i, group=group))
+        samples.append(_sample("agenttraj_synth", 1, i, group=group))
+        samples.append(_sample("agenttraj_l", 0, 100 + i, group=f"clean-{i}"))
+
+    left, right = stratified_grouped_split(samples, train_ratio=0.5, seed=0)
+    for side in (left, right):
+        pair_groups = {
+            s.metadata["split_group"]
+            for s in side
+            if s.metadata["split_group"].startswith("pair-")
+        }
+        clean_groups = {
+            s.metadata["split_group"]
+            for s in side
+            if s.metadata["split_group"].startswith("clean-")
+        }
+        assert len(pair_groups) == 5
+        assert len(clean_groups) == 5

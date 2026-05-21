@@ -3,7 +3,7 @@ agentdojo:
   user_task_sample_frac: 0.20
   injection_task_sample_frac: 0.20
   max_rounds: 15
-  detection_threshold: 0.5
+  detection_threshold: null  # null means use the calibrated threshold stored in the detector artifact
 
 asb:
   attack_types: [DPI, OPI]

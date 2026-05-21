@@ -70,6 +70,7 @@ def load(root: Path, max_samples: int | None = None) -> list[UnifiedSample]:
                         "original_id": idx,
                         "attack_type": row.get("Attack Type"),
                         "modified": row.get("Modifed"),
+                        "malicious_tool_message_indices": [3],
                     },
                 )
             )

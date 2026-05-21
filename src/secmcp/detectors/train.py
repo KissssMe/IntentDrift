@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import pickle
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -45,26 +46,49 @@ def train_rf_anchor(
     feature_mode: str = "concat",
     seed: int = 42,
     rf_params: dict[str, Any] | None = None,
+    show_progress: bool = False,
 ) -> TrainedDetector:
     from sklearn.ensemble import RandomForestClassifier
 
+    if show_progress:
+        print(f"[train] selecting anchors n={n_anchors}", file=sys.stderr, flush=True)
     anchors = select_anchors(train.activations, train.labels, n_anchors=n_anchors, seed=seed)
+    if show_progress:
+        print("[train] building train distance features", file=sys.stderr, flush=True)
     x_train = distance_features(train.activations, anchors, mode=feature_mode)
+    if show_progress:
+        print(f"[train] train features shape={tuple(x_train.shape)}", file=sys.stderr, flush=True)
+        print("[train] building val distance features", file=sys.stderr, flush=True)
     x_val = distance_features(val.activations, anchors, mode=feature_mode)
+    if show_progress:
+        print(f"[train] val features shape={tuple(x_val.shape)}", file=sys.stderr, flush=True)
 
     params = dict(rf_params or {})
     params.setdefault("random_state", seed)
+    if show_progress:
+        print(f"[train] fitting RandomForestClassifier params={params}", file=sys.stderr, flush=True)
     clf = RandomForestClassifier(**params)
     clf.fit(_to_numpy(x_train), _to_numpy(train.labels))
 
+    if show_progress:
+        print("[train] scoring val", file=sys.stderr, flush=True)
     val_scores = predict_scores(clf, x_val)
     val_metrics = binary_metrics(_to_numpy(val.labels), val_scores).to_dict()
+    if show_progress:
+        print(f"[train] val metrics={val_metrics}", file=sys.stderr, flush=True)
 
     test_metrics = None
     if test is not None:
+        if show_progress:
+            print("[train] building test distance features", file=sys.stderr, flush=True)
         x_test = distance_features(test.activations, anchors, mode=feature_mode)
+        if show_progress:
+            print(f"[train] test features shape={tuple(x_test.shape)}", file=sys.stderr, flush=True)
+            print("[train] scoring test", file=sys.stderr, flush=True)
         test_scores = predict_scores(clf, x_test)
         test_metrics = binary_metrics(_to_numpy(test.labels), test_scores).to_dict()
+        if show_progress:
+            print(f"[train] test metrics={test_metrics}", file=sys.stderr, flush=True)
 
     return TrainedDetector(
         model_name=model_name,
@@ -89,28 +113,51 @@ def train_logistic_diff(
     feature_mode: str = "concat",
     seed: int = 42,
     logistic_params: dict[str, Any] | None = None,
+    show_progress: bool = False,
 ) -> TrainedDetector:
     from sklearn.linear_model import LogisticRegression
     from sklearn.pipeline import make_pipeline
     from sklearn.preprocessing import StandardScaler
 
+    if show_progress:
+        print(f"[train] selecting anchors n={n_anchors}", file=sys.stderr, flush=True)
     anchors = select_anchors(train.activations, train.labels, n_anchors=n_anchors, seed=seed)
+    if show_progress:
+        print("[train] building train diff features", file=sys.stderr, flush=True)
     x_train = diff_features(train.activations, anchors, mode=feature_mode)
+    if show_progress:
+        print(f"[train] train features shape={tuple(x_train.shape)}", file=sys.stderr, flush=True)
+        print("[train] building val diff features", file=sys.stderr, flush=True)
     x_val = diff_features(val.activations, anchors, mode=feature_mode)
+    if show_progress:
+        print(f"[train] val features shape={tuple(x_val.shape)}", file=sys.stderr, flush=True)
 
     params = dict(logistic_params or {})
     params.setdefault("random_state", seed)
+    if show_progress:
+        print(f"[train] fitting LogisticRegression params={params}", file=sys.stderr, flush=True)
     clf = make_pipeline(StandardScaler(), LogisticRegression(**params))
     clf.fit(_to_numpy(x_train), _to_numpy(train.labels))
 
+    if show_progress:
+        print("[train] scoring val", file=sys.stderr, flush=True)
     val_scores = predict_scores(clf, x_val)
     val_metrics = binary_metrics(_to_numpy(val.labels), val_scores).to_dict()
+    if show_progress:
+        print(f"[train] val metrics={val_metrics}", file=sys.stderr, flush=True)
 
     test_metrics = None
     if test is not None:
+        if show_progress:
+            print("[train] building test diff features", file=sys.stderr, flush=True)
         x_test = diff_features(test.activations, anchors, mode=feature_mode)
+        if show_progress:
+            print(f"[train] test features shape={tuple(x_test.shape)}", file=sys.stderr, flush=True)
+            print("[train] scoring test", file=sys.stderr, flush=True)
         test_scores = predict_scores(clf, x_test)
         test_metrics = binary_metrics(_to_numpy(test.labels), test_scores).to_dict()
+        if show_progress:
+            print(f"[train] test metrics={test_metrics}", file=sys.stderr, flush=True)
 
     return TrainedDetector(
         model_name=model_name,
@@ -156,11 +203,16 @@ def train_detector_from_disk(
     output_root: Path | None = None,
     n_anchors: int | None = None,
     include_test: bool = True,
+    show_progress: bool = False,
 ) -> TrainedDetector:
     cfg = load_training_cfg()
-    train = load_activation_split(model_name, "train", activation_root)
-    val = load_activation_split(model_name, "val", activation_root)
-    test = load_activation_split(model_name, "test", activation_root) if include_test else None
+    train = load_activation_split(model_name, "train", activation_root, show_progress=show_progress)
+    val = load_activation_split(model_name, "val", activation_root, show_progress=show_progress)
+    test = (
+        load_activation_split(model_name, "test", activation_root, show_progress=show_progress)
+        if include_test
+        else None
+    )
     seed = int(getattr(cfg.splits, "random_seed", 42)) if hasattr(cfg, "splits") else 42
     feature_mode = getattr(cfg.layers, "mode", "concat")
     anchor_n = int(n_anchors or cfg.anchor.default)
@@ -175,6 +227,7 @@ def train_detector_from_disk(
             feature_mode=feature_mode,
             seed=getattr(cfg.rf_anchor, "random_state", seed),
             rf_params=vars(cfg.rf_anchor),
+            show_progress=show_progress,
         )
     elif detector_type == "logistic_diff":
         logistic_params = vars(cfg.logistic).copy()
@@ -192,9 +245,13 @@ def train_detector_from_disk(
             feature_mode=feature_mode,
             seed=getattr(cfg.logistic, "random_state", seed),
             logistic_params=logistic_params,
+            show_progress=show_progress,
         )
     else:
         raise ValueError(f"Unknown detector_type: {detector_type}")
 
-    save_detector(detector, detector_output_dir(model_name, output_root))
+    output_dir = detector_output_dir(model_name, output_root)
+    if show_progress:
+        print(f"[train] saving detector to {output_dir}", file=sys.stderr, flush=True)
+    save_detector(detector, output_dir)
     return detector

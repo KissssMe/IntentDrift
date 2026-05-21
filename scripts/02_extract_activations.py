@@ -52,6 +52,7 @@ def main() -> None:
             shard_size=args.shard_size,
             resume=not args.no_resume,
             show_progress=not args.no_progress,
+            log_every=args.log_every,
         )
     else:
         summary = extract_split_activations(

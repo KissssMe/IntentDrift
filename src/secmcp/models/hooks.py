@@ -123,3 +123,107 @@ def last_token_hidden_states(
     with torch.no_grad():
         outputs = model(inputs, output_hidden_states=True, use_cache=False)
     return extract_last_token_from_hidden_states(outputs.hidden_states, layers)
+
+
+# ── task-anchored hidden states ────────────────────────────────────────────
+#
+# In a causal LM, hidden states at position t see only tokens 0..t. So you
+# cannot probe how "context that comes later" affects the representation of an
+# earlier task token directly. The trick (Abdelnabi 2024, TaskTracker) is to
+# *re-append* the task description at the end of the rendered context and
+# probe the appended copy. Those tokens sit at the tail and therefore attend
+# to all preceding history (system, original user task, assistant turns, tool
+# outputs); the difference between probes under different prefixes isolates
+# how added context shifts the model's understanding of the task.
+
+TASK_ANCHOR_SEPARATOR = "\n\n[Recap of original user task]: "
+TASK_ANCHOR_EXTRACTION_MODE = "task_anchor_mean"
+
+
+def _apply_chat_template_to_ids(
+    tokenizer: Any,
+    messages: list[dict[str, Any]],
+    add_generation_prompt: bool = False,
+) -> list[int]:
+    out = tokenizer.apply_chat_template(
+        messages,
+        tokenize=True,
+        add_generation_prompt=add_generation_prompt,
+        return_tensors=None,
+    )
+    if hasattr(out, "tolist"):
+        out = out.tolist()
+    if isinstance(out, list) and out and isinstance(out[0], list):
+        out = out[0]
+    return [int(t) for t in out]
+
+
+def _encode_text_ids(tokenizer: Any, text: str) -> list[int]:
+    if not text:
+        return []
+    ids = tokenizer.encode(text, add_special_tokens=False)
+    if hasattr(ids, "tolist"):
+        ids = ids.tolist()
+    return [int(t) for t in ids]
+
+
+def task_anchored_hidden_states(
+    model: Any,
+    tokenizer: Any,
+    prefix_messages: list[dict[str, Any]],
+    task_text: str,
+    layers: list[int],
+    cfg: SimpleNamespace,
+):
+    """Probe hidden states of the user-task tokens re-appended at the end of `prefix_messages`.
+
+    Output shape: ``[len(layers), hidden_dim]`` — mean-pooled across the
+    appended task tokens at each requested layer.
+
+    If ``task_text`` is empty (degenerate trajectory) we fall back to the
+    last-token hidden state of the rendered prefix so the runtime detector
+    keeps working rather than crashing.
+    """
+    import torch
+
+    if not task_text:
+        return last_token_hidden_states(model, tokenizer, prefix_messages, layers, cfg)
+
+    normalized = normalize_chat_messages(prefix_messages, cfg)
+
+    sep_ids = _encode_text_ids(tokenizer, TASK_ANCHOR_SEPARATOR)
+    task_ids = _encode_text_ids(tokenizer, task_text)
+    if not task_ids:
+        return last_token_hidden_states(model, tokenizer, prefix_messages, layers, cfg)
+
+    # Reserve headroom for separator + task tokens so head_tail truncation
+    # never eats into the appended anchor.
+    base_max = int(getattr(cfg, "detect_max_tokens", 1024))
+    headroom = len(sep_ids) + len(task_ids) + 8
+    truncate_cfg = SimpleNamespace(**{**vars(cfg), "detect_max_tokens": max(64, base_max - headroom)})
+    truncated = truncate_messages(normalized, tokenizer, truncate_cfg)
+
+    try:
+        prefix_ids = _apply_chat_template_to_ids(tokenizer, truncated, add_generation_prompt=False)
+    except Exception:
+        rendered = format_messages(truncated)
+        prefix_ids = _apply_chat_template_to_ids(
+            tokenizer,
+            [{"role": "user", "content": rendered}],
+            add_generation_prompt=False,
+        )
+
+    full_ids = prefix_ids + sep_ids + task_ids
+    task_token_count = len(task_ids)
+
+    input_ids = torch.tensor([full_ids], dtype=torch.long)
+    input_ids = _move_to_device(input_ids, _model_device(model))
+    with torch.no_grad():
+        outputs = model(input_ids, output_hidden_states=True, use_cache=False)
+
+    validate_layers(layers, len(outputs.hidden_states))
+    pooled = [
+        outputs.hidden_states[layer + 1][0, -task_token_count:].mean(dim=0).detach().cpu()
+        for layer in layers
+    ]
+    return torch.stack(pooled)

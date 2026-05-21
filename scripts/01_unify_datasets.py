@@ -15,6 +15,30 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-per-source", type=int, default=None, help="Small debug cap per source.")
     parser.add_argument("--agentdojo-pipeline", default=None, help="Optional AgentDojo runs subdir, e.g. command-r.")
     parser.add_argument("--output-dir", type=Path, default=OUTPUTS_DIR / "splits", help="Directory for split jsonl files.")
+    parser.add_argument(
+        "--counterfactual-pairs",
+        action="store_true",
+        help=(
+            "Replace AgentTraj-L benign trajectories with paired (clean, attacked) groups. "
+            "Each injectable benign trajectory is emitted as a clean copy plus N attacked clones "
+            "sharing one split_group, so 'same task & history, only the tool differs' is preserved on one side of the split."
+        ),
+    )
+    parser.add_argument(
+        "--counterfactual-attacks-per-benign",
+        type=int,
+        default=1,
+        help="Number of attacked clones per benign trajectory when --counterfactual-pairs is set.",
+    )
+    parser.add_argument(
+        "--keep-unlocatable-positives",
+        action="store_true",
+        help=(
+            "Retain positive samples that have no injection locator (no malicious_tool_message_indices "
+            "and no injection_text/fragments). By default these are dropped because their step-level "
+            "supervision is contradictory."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -26,6 +50,9 @@ def main() -> None:
         seed=cfg.splits.random_seed,
         max_per_source=args.max_per_source,
         agentdojo_pipeline=args.agentdojo_pipeline,
+        counterfactual_pairs=args.counterfactual_pairs,
+        counterfactual_attacks_per_benign=args.counterfactual_attacks_per_benign,
+        drop_unlocatable=not args.keep_unlocatable_positives,
     )
     splits = make_splits(
         samples,

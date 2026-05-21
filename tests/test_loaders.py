@@ -47,6 +47,13 @@ def test_agentdojo_text_is_not_python_repr():
         )
 
 
+def test_agentdojo_malicious_samples_keep_injection_fragments():
+    samples = agentdojo.load(DATA_DIR / "AgentDojo", max_samples=200)
+    malicious = [sample for sample in samples if sample.label == 1 and sample.metadata.get("injection_text")]
+    assert malicious
+    assert all(sample.metadata.get("injection_fragments") for sample in malicious)
+
+
 def test_agenttraj_is_benign_only():
     samples = agenttraj_l.load(DATA_DIR / "AgentTraj-L", max_samples=20)
     assert samples

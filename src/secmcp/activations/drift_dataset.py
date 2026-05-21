@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -28,20 +29,43 @@ def read_meta_jsonl(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def load_drift_split(model_name: str, split: str, root: Path | None = None) -> DriftActivationSplit:
+def load_drift_split(
+    model_name: str,
+    split: str,
+    root: Path | None = None,
+    show_progress: bool = False,
+) -> DriftActivationSplit:
     import torch
 
     out_dir = drift_output_dir(model_name, split, root or OUTPUTS_DIR / "drift_activations")
     shard_indices = completed_drift_shards(out_dir)
     if not shard_indices:
         raise FileNotFoundError(f"No complete drift activation shards found in {out_dir}")
+    if show_progress:
+        print(
+            f"[load] drift split={split} shards={len(shard_indices)} dir={out_dir}",
+            file=sys.stderr,
+            flush=True,
+        )
 
     task = []
     history = []
     post = []
     labels = []
     metas: list[dict[str, Any]] = []
-    for idx in shard_indices:
+    iterator = shard_indices
+    if show_progress:
+        from tqdm import tqdm
+
+        iterator = tqdm(
+            shard_indices,
+            desc=f"load {model_name}/{split}",
+            unit="shard",
+            dynamic_ncols=True,
+            file=sys.stderr,
+            mininterval=1.0,
+        )
+    for idx in iterator:
         drift_path, label_path, meta_path = drift_shard_paths(out_dir, idx)
         payload = torch.load(drift_path, map_location="cpu", weights_only=True)
         y = torch.load(label_path, map_location="cpu", weights_only=True)
@@ -56,6 +80,12 @@ def load_drift_split(model_name: str, split: str, root: Path | None = None) -> D
         post.append(payload["post"])
         labels.append(y)
         metas.extend(meta_rows)
+    if show_progress:
+        print(
+            f"[load] drift split={split} steps={sum(int(y.shape[0]) for y in labels)}",
+            file=sys.stderr,
+            flush=True,
+        )
 
     return DriftActivationSplit(
         task=torch.cat(task, dim=0),

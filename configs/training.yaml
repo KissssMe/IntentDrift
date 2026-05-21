@@ -16,7 +16,11 @@ task_drift:
   max_leaf_nodes: 31
   l2_regularization: 0.0
   include_anchor_distances: true
-  aggregation: max                 # alternatives: top2_mean
+  include_self_baseline: true       # per-trajectory z-score of drift norms (handles source/suite heterogeneity)
+  aggregation: max                  # alternatives: top2_mean, mean, first_exceed_K, cusum, cusum_wN_sX_rY
+  sample_weight: balanced           # counter step-level label imbalance
+  threshold_target_tpr: 0.95
+  threshold_max_fpr: null           # set to e.g. 0.20 to constrain val false abort rate
 
 logistic:
   C: [0.01, 0.1, 1.0, 10.0]
