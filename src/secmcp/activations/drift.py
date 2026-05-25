@@ -9,7 +9,11 @@ from typing import Any, Callable, Iterable
 from secmcp.config import OUTPUTS_DIR
 from secmcp.data.io import read_samples_jsonl
 from secmcp.data.schema import UnifiedSample, normalize_messages_for_chat
-from secmcp.models.hooks import TASK_ANCHOR_EXTRACTION_MODE, task_anchored_hidden_states
+from secmcp.models.hooks import (
+    TASK_ANCHOR_EXTRACTION_MODE,
+    task_anchored_hidden_states,
+    task_anchored_hidden_states_batch,
+)
 
 
 @dataclass(frozen=True)
@@ -270,17 +274,22 @@ def extract_split_drift_activations(
     resume: bool = True,
     show_progress: bool = False,
     log_every: int = 1,
+    batch_steps: int = 1,
+    write_output: bool = True,
     activation_fn: Callable[..., Any] | None = None,
+    activation_batch_fn: Callable[..., list[Any]] | None = None,
 ) -> DriftExtractionSummary:
     if activation_fn is None:
         activation_fn = task_anchored_hidden_states
+        activation_batch_fn = activation_batch_fn or task_anchored_hidden_states_batch
+    batch_steps = max(1, int(batch_steps))
     root = splits_dir or OUTPUTS_DIR / "splits"
     samples = read_samples_jsonl(root / f"{split}.jsonl")
     steps = list(iter_tool_steps(samples))
     out_dir = drift_output_dir(model_name, split, output_root)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    if not resume:
+    if not resume and write_output:
         clear_drift_shards(out_dir)
     if resume:
         validate_completed_drift_shards(out_dir)
@@ -296,7 +305,7 @@ def extract_split_drift_activations(
     if show_progress:
         print(
             f"[drift] model={model_name} split={split} samples={len(samples)} "
-            f"steps={len(steps)} skipped={skipped} output_dir={out_dir}",
+            f"steps={len(steps)} skipped={skipped} batch_steps={batch_steps} output_dir={out_dir}",
             file=sys.stderr,
             flush=True,
         )
@@ -318,35 +327,73 @@ def extract_split_drift_activations(
         )
 
     try:
-        for step in pending_steps:
+        for start in range(0, len(pending_steps), batch_steps):
+            step_batch = pending_steps[start : start + batch_steps]
+            first_step = step_batch[0]
             if show_progress and log_every > 0 and (extracted == 0 or extracted % log_every == 0):
                 print(
-                    f"[drift] starting sample_index={step.sample_index} "
-                    f"step_index={step.step_index} "
-                    f"tool_message_index={step.meta.get('tool_message_index')} "
-                    f"done={skipped + extracted}/{len(steps)} label={step.label}",
+                    f"[drift] starting batch_size={len(step_batch)} "
+                    f"sample_index={first_step.sample_index} "
+                    f"step_index={first_step.step_index} "
+                    f"tool_message_index={first_step.meta.get('tool_message_index')} "
+                    f"done={skipped + extracted}/{len(steps)} label={first_step.label}",
                     file=sys.stderr,
                     flush=True,
                 )
-            task = activation_fn(model, tokenizer, step.task_prefix, step.task_text, layers, cfg)
-            history = activation_fn(model, tokenizer, step.history_prefix, step.task_text, layers, cfg)
-            post = activation_fn(model, tokenizer, step.post_tool_prefix, step.task_text, layers, cfg)
-            records.append({"task": task, "history": history, "post": post, "label": step.label, "meta": step.meta})
-            extracted += 1
-            if progress is not None:
-                progress.update(1)
-            if len(records) >= shard_size:
-                write_drift_shard(out_dir, shard_idx, records)
-                written += 1
-                shard_idx += 1
-                records = []
+            if activation_batch_fn is not None and batch_steps > 1:
+                task_batch = activation_batch_fn(
+                    model,
+                    tokenizer,
+                    [(step.task_prefix, step.task_text) for step in step_batch],
+                    layers,
+                    cfg,
+                )
+                history_batch = activation_batch_fn(
+                    model,
+                    tokenizer,
+                    [(step.history_prefix, step.task_text) for step in step_batch],
+                    layers,
+                    cfg,
+                )
+                post_batch = activation_batch_fn(
+                    model,
+                    tokenizer,
+                    [(step.post_tool_prefix, step.task_text) for step in step_batch],
+                    layers,
+                    cfg,
+                )
+            else:
+                task_batch = [
+                    activation_fn(model, tokenizer, step.task_prefix, step.task_text, layers, cfg)
+                    for step in step_batch
+                ]
+                history_batch = [
+                    activation_fn(model, tokenizer, step.history_prefix, step.task_text, layers, cfg)
+                    for step in step_batch
+                ]
+                post_batch = [
+                    activation_fn(model, tokenizer, step.post_tool_prefix, step.task_text, layers, cfg)
+                    for step in step_batch
+                ]
+
+            for step, task, history, post in zip(step_batch, task_batch, history_batch, post_batch, strict=True):
+                records.append({"task": task, "history": history, "post": post, "label": step.label, "meta": step.meta})
+                extracted += 1
                 if progress is not None:
-                    progress.set_postfix(shards=shard_idx)
+                    progress.update(1)
+                if len(records) >= shard_size:
+                    if write_output:
+                        write_drift_shard(out_dir, shard_idx, records)
+                    written += 1
+                    shard_idx += 1
+                    records = []
+                    if progress is not None:
+                        progress.set_postfix(shards=shard_idx)
     finally:
         if progress is not None:
             progress.close()
 
-    if records:
+    if records and write_output:
         write_drift_shard(out_dir, shard_idx, records)
         written += 1
 

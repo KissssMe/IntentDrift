@@ -11,6 +11,7 @@ from secmcp.models.hooks import (
     normalize_chat_messages,
     prepare_inputs,
     task_anchored_hidden_states,
+    task_anchored_hidden_states_batch,
 )
 
 
@@ -18,6 +19,9 @@ torch = pytest.importorskip("torch")
 
 
 class FakeTokenizer:
+    pad_token_id = 0
+    eos_token_id = 1
+
     def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
         return list(range(max(1, len(text))))
 
@@ -35,12 +39,15 @@ class FakeModel:
         self.hidden_dim = hidden_dim
         self.called_eval = False
 
-    def __call__(self, inputs, output_hidden_states=False, use_cache=False):
+    def __call__(self, inputs=None, output_hidden_states=False, use_cache=False, **kwargs):
         assert output_hidden_states is True
-        seq_len = inputs.shape[-1]
+        if inputs is None:
+            inputs = kwargs["input_ids"]
+        batch_size, seq_len = inputs.shape
         hidden_states = []
         for layer in range(self.n_layers + 1):
             base = torch.arange(seq_len * self.hidden_dim, dtype=torch.float32).reshape(1, seq_len, self.hidden_dim)
+            base = base.repeat(batch_size, 1, 1)
             hidden_states.append(base + layer * 100)
         return SimpleNamespace(hidden_states=tuple(hidden_states))
 
@@ -161,3 +168,27 @@ def test_task_anchored_differs_across_prefixes():
     out_short = task_anchored_hidden_states(model, tokenizer, short_prefix, "task", [0, 3], _cfg())
     out_long = task_anchored_hidden_states(model, tokenizer, long_prefix, "task", [0, 3], _cfg())
     assert not torch.allclose(out_short, out_long)
+
+
+def test_task_anchored_hidden_states_batch_matches_single():
+    model = FakeModel(n_layers=4, hidden_dim=3)
+    tokenizer = FakeTokenizer()
+    requests = [
+        ([{"role": "user", "content": "task"}], "task"),
+        (
+            [
+                {"role": "user", "content": "task"},
+                {"role": "assistant", "content": "calling tool"},
+                {"role": "tool", "content": "tool output"},
+            ],
+            "task",
+        ),
+    ]
+    batched = task_anchored_hidden_states_batch(model, tokenizer, requests, [0, 3], _cfg())
+    singles = [
+        task_anchored_hidden_states(model, tokenizer, prefix, task_text, [0, 3], _cfg())
+        for prefix, task_text in requests
+    ]
+    assert len(batched) == len(singles)
+    for batch_out, single_out in zip(batched, singles, strict=True):
+        assert torch.allclose(batch_out, single_out)

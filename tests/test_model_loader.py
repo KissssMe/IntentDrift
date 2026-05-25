@@ -54,6 +54,26 @@ def test_load_shared_model_caches():
     clear_model_cache()
 
 
+def test_load_shared_model_tensor_parallel_uses_separate_cache_key():
+    clear_model_cache()
+    fake_default = LoadedModel(name="fake", model="default", tokenizer=None, cfg=SimpleNamespace())
+    fake_tp = LoadedModel(name="fake", model="tp", tokenizer=None, cfg=SimpleNamespace())
+
+    with patch("secmcp.models.loader.load_model") as mock_load:
+        mock_load.side_effect = [fake_default, fake_tp]
+        r1 = load_shared_model("fake")
+        r2 = load_shared_model("fake", tensor_parallel=True)
+        r3 = load_shared_model("fake", tensor_parallel=True)
+
+    assert r1 is fake_default
+    assert r2 is fake_tp
+    assert r3 is fake_tp
+    assert mock_load.call_count == 2
+    mock_load.assert_any_call("fake")
+    mock_load.assert_any_call("fake", tensor_parallel=True)
+    clear_model_cache()
+
+
 def test_load_shared_model_different_names_load_separately():
     """Two different model names must each get their own load_model call."""
     clear_model_cache()

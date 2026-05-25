@@ -88,6 +88,8 @@ def _model_device(model: Any):
 
 def _move_to_device(inputs: Any, device: Any):
     if device is None or not hasattr(inputs, "to"):
+        if isinstance(inputs, dict):
+            return {key: _move_to_device(value, device) for key, value in inputs.items()}
         return inputs
     return inputs.to(device)
 
@@ -227,3 +229,113 @@ def task_anchored_hidden_states(
         for layer in layers
     ]
     return torch.stack(pooled)
+
+
+def _pad_token_id(tokenizer: Any, cfg: SimpleNamespace) -> int:
+    token_id = getattr(tokenizer, "pad_token_id", None)
+    if token_id is None:
+        token_id = getattr(tokenizer, "eos_token_id", None)
+    if token_id is None:
+        token_id = getattr(cfg, "pad_token_id", None)
+    return int(token_id) if token_id is not None else 0
+
+
+def _task_anchor_ids(
+    tokenizer: Any,
+    prefix_messages: list[dict[str, Any]],
+    task_text: str,
+    cfg: SimpleNamespace,
+) -> tuple[list[int], int] | None:
+    if not task_text:
+        return None
+
+    normalized = normalize_chat_messages(prefix_messages, cfg)
+    sep_ids = _encode_text_ids(tokenizer, TASK_ANCHOR_SEPARATOR)
+    task_ids = _encode_text_ids(tokenizer, task_text)
+    if not task_ids:
+        return None
+
+    base_max = int(getattr(cfg, "detect_max_tokens", 1024))
+    headroom = len(sep_ids) + len(task_ids) + 8
+    truncate_cfg = SimpleNamespace(**{**vars(cfg), "detect_max_tokens": max(64, base_max - headroom)})
+    truncated = truncate_messages(normalized, tokenizer, truncate_cfg)
+
+    try:
+        prefix_ids = _apply_chat_template_to_ids(tokenizer, truncated, add_generation_prompt=False)
+    except Exception:
+        rendered = format_messages(truncated)
+        prefix_ids = _apply_chat_template_to_ids(
+            tokenizer,
+            [{"role": "user", "content": rendered}],
+            add_generation_prompt=False,
+        )
+
+    return prefix_ids + sep_ids + task_ids, len(task_ids)
+
+
+def task_anchored_hidden_states_batch(
+    model: Any,
+    tokenizer: Any,
+    requests: list[tuple[list[dict[str, Any]], str]],
+    layers: list[int],
+    cfg: SimpleNamespace,
+) -> list[Any]:
+    """Batch version of task_anchored_hidden_states.
+
+    Returns one ``[len(layers), hidden_dim]`` tensor per request. Requests with
+    an empty task text fall back to the scalar implementation, preserving the
+    existing degenerate behavior.
+    """
+    import torch
+
+    if not requests:
+        return []
+
+    prepared: list[tuple[list[int], int] | None] = [
+        _task_anchor_ids(tokenizer, prefix_messages, task_text, cfg)
+        for prefix_messages, task_text in requests
+    ]
+
+    batch_items = [(idx, item) for idx, item in enumerate(prepared) if item is not None]
+    results: list[Any | None] = [None] * len(requests)
+
+    if batch_items:
+        pad_token_id = _pad_token_id(tokenizer, cfg)
+        max_len = max(len(ids) for _, (ids, _) in batch_items)
+        input_rows = []
+        mask_rows = []
+        lengths = []
+        task_token_counts = []
+        for _, (ids, task_token_count) in batch_items:
+            pad_len = max_len - len(ids)
+            input_rows.append(ids + [pad_token_id] * pad_len)
+            mask_rows.append([1] * len(ids) + [0] * pad_len)
+            lengths.append(len(ids))
+            task_token_counts.append(task_token_count)
+
+        inputs = {
+            "input_ids": torch.tensor(input_rows, dtype=torch.long),
+            "attention_mask": torch.tensor(mask_rows, dtype=torch.long),
+        }
+        inputs = _move_to_device(inputs, _model_device(model))
+        with torch.no_grad():
+            outputs = model(**inputs, output_hidden_states=True, use_cache=False)
+
+        validate_layers(layers, len(outputs.hidden_states))
+        for row_idx, (request_idx, _) in enumerate(batch_items):
+            seq_len = lengths[row_idx]
+            task_token_count = task_token_counts[row_idx]
+            pooled = [
+                outputs.hidden_states[layer + 1][row_idx, seq_len - task_token_count : seq_len].mean(dim=0).detach().cpu()
+                for layer in layers
+            ]
+            results[request_idx] = torch.stack(pooled)
+
+    for idx, item in enumerate(prepared):
+        if item is None:
+            prefix_messages, task_text = requests[idx]
+            results[idx] = task_anchored_hidden_states(model, tokenizer, prefix_messages, task_text, layers, cfg)
+
+    if any(result is None for result in results):
+        raise RuntimeError("Missing task-anchor batch result")
+    return [result for result in results if result is not None]

@@ -36,7 +36,7 @@ def namespace_to_plain(value: Any) -> Any:
     return value
 
 
-def load_model(name: str) -> LoadedModel:
+def load_model(name: str, *, tensor_parallel: bool = False) -> LoadedModel:
     """Load a configured HuggingFace causal LM and tokenizer (no caching).
 
     Prefer load_shared_model() in application code to avoid loading the same
@@ -59,25 +59,30 @@ def load_model(name: str) -> LoadedModel:
     if getattr(tokenizer, "pad_token_id", None) is None and getattr(cfg, "pad_token_id", None) is not None:
         tokenizer.pad_token_id = cfg.pad_token_id
 
-    model = AutoModelForCausalLM.from_pretrained(
-        cfg.path,
-        dtype=torch_dtype(cfg.dtype),
-        device_map=namespace_to_plain(cfg.device_map),
-        trust_remote_code=bool(getattr(cfg, "trust_remote_code", False)),
-    )
+    model_kwargs = {
+        "dtype": torch_dtype(cfg.dtype),
+        "trust_remote_code": bool(getattr(cfg, "trust_remote_code", False)),
+    }
+    if tensor_parallel:
+        model_kwargs["tp_plan"] = "auto"
+    else:
+        model_kwargs["device_map"] = namespace_to_plain(cfg.device_map)
+
+    model = AutoModelForCausalLM.from_pretrained(cfg.path, **model_kwargs)
     model.eval()
     return LoadedModel(name=name, model=model, tokenizer=tokenizer, cfg=cfg)
 
 
-def load_shared_model(name: str) -> LoadedModel:
+def load_shared_model(name: str, *, tensor_parallel: bool = False) -> LoadedModel:
     """Return a cached LoadedModel, loading from disk only on the first call.
 
     All callers within the same process (LocalHFLLM, ActivationDetectorElement,
     extraction scripts) will receive the same instance.
     """
-    if name not in _MODEL_CACHE:
-        _MODEL_CACHE[name] = load_model(name)
-    return _MODEL_CACHE[name]
+    cache_key = name if not tensor_parallel else f"{name}::tp"
+    if cache_key not in _MODEL_CACHE:
+        _MODEL_CACHE[cache_key] = load_model(name, tensor_parallel=True) if tensor_parallel else load_model(name)
+    return _MODEL_CACHE[cache_key]
 
 
 def clear_model_cache() -> None:

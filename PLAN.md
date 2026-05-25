@@ -605,3 +605,34 @@ conda run -n taskdrift python scripts/04_eval_agentdojo.py --defense abort \
 - 训练正式 detector 后再跑 AgentDojo；mini detector 只用于 pipeline smoke。
 - AgentDojo 多样本评估要显式加 `--user-task-frac 1.0 --injection-task-frac 1.0`，否则先按 `eval.yaml` 的 20% 采样再 cap。
 - baseline / shadow / abort 分开跑；若 `none` 继续 JSONDecodeError，换官方 OpenAI key 或更稳 endpoint。
+
+## 2026-05-25 Qwen3-32B 激活提取记录
+
+- 原 `device_map:auto` 四卡只做层切分，GPU 利用率低；`--batch-steps 2` 对 HF/Accelerate 路径帮助有限。
+- 已新增 opt-in 参数：`--batch-steps`（默认 `1`）和 `--tensor-parallel`（默认关闭）。不传新参数时旧单卡/旧多卡 `device_map` 路径不变。
+- 新建独立环境 `taskdrift-tp` 用于 TP，未升级原 `taskdrift` 环境；当前关键版本：`torch 2.5.1+cu121`、`transformers 4.57.6`、`accelerate 1.13.0`。
+- 已卸载 `taskdrift-tp` 中不匹配且本任务不用的 `torchvision/torchaudio`，避免 Transformers 导入 Qwen3 时触发 `torchvision::nms` 错误。
+- Qwen3-32B train 已写出若干完整 shard 到 `outputs/drift_activations/qwen3_32b/train/`，脚本会自动 resume。
+
+常用检查：
+
+```bash
+find outputs/drift_activations/qwen3_32b/train -maxdepth 1 -name 'drift_*.pt' | wc -l
+nvidia-smi --query-gpu=index,utilization.gpu,memory.used,memory.total --format=csv,noheader
+```
+
+继续跑 Qwen3-32B train（TP，0-3 卡，较稳版本）：
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 MASTER_ADDR=127.0.0.1 MASTER_PORT=29545 \
+MPLCONFIGDIR=/tmp/mpl-secmcp-qwen PYTHONPATH=src \
+/data/home/Haoran/miniconda3/envs/taskdrift-tp/bin/torchrun \
+  --nnodes 1 --nproc-per-node 4 \
+  --master-addr 127.0.0.1 --master-port 29545 \
+  scripts/02_extract_activations.py \
+  --model qwen3_32b --split train --mode task_drift \
+  --shard-size 100 --log-every 10 \
+  --batch-steps 1 --tensor-parallel
+```
+
+同样方式跑 val/test：只改 `--split val` 或 `--split test`，建议换一个未占用的 `MASTER_PORT`。
